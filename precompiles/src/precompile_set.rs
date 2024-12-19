@@ -412,7 +412,7 @@ pub struct RestrictiveHandle<'a, H> {
 	allow_subcalls: bool,
 }
 
-impl<'a, H: PrecompileHandle> PrecompileHandle for RestrictiveHandle<'a, H> {
+impl<H: PrecompileHandle> PrecompileHandle for RestrictiveHandle<'_, H> {
 	fn call(
 		&mut self,
 		address: H160,
