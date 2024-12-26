@@ -25,12 +25,15 @@ members = [
 	"client/db",
 	"client/storage",
 	"client/mapping-sync",
+	"client/evm-tracing",
 	"primitives/account",
 	"primitives/consensus",
 	"primitives/dynamic-fee",
 	"primitives/evm",
 	"primitives/rpc",
 	"primitives/self-contained",
+	"primitives/debug",
+	"primitives/evm-tracing-events",
 	"template/node",
 	"template/runtime",
 	"precompiles",
@@ -53,6 +56,7 @@ environmental = { version = "1.1.4", default-features = false }
 ethereum = { version = "0.15.0", default-features = false }
 ethereum-types = { version = "0.14.1", default-features = false }
 evm = { version = "0.41.1", default-features = false }
+evm-runtime = { git = "https://github.com/moonbeam-foundation/evm", branch = "moonbeam-polkadot-stable2407", default-features = false }
 futures = "0.3.30"
 hash-db = { version = "0.16.0", default-features = false }
 hex = { version = "0.4.3", default-features = false, features = ["alloc"] }
@@ -68,6 +72,7 @@ parity-db = "0.4.13"
 parking_lot = "0.12.2"
 rlp = { version = "0.5.2", default-features = false }
 scale-codec = { package = "parity-scale-codec", version = "3.6.4", default-features = false, features = ["derive"] }
+parity-scale-codec = { package = "parity-scale-codec", version = "3.6.4", default-features = false, features = ["derive"] }
 scale-info = { version = "2.11.2", default-features = false, features = ["derive"] }
 serde = { version = "1.0", default-features = false, features = ["derive", "alloc"] }
 serde_json = "1.0"
@@ -170,6 +175,7 @@ fc-mapping-sync = { path = "client/mapping-sync", default-features = false }
 fc-rpc = { path = "client/rpc", default-features = false }
 fc-rpc-core = { path = "client/rpc-core" }
 fc-storage = { path = "client/storage" }
+client-evm-tracing = { path = "client/evm-tracing" }
 # Frontier Primitive
 fp-account = { path = "primitives/account", default-features = false }
 fp-consensus = { path = "primitives/consensus", default-features = false }
@@ -179,6 +185,8 @@ fp-evm = { path = "primitives/evm", default-features = false }
 fp-rpc = { path = "primitives/rpc", default-features = false }
 fp-self-contained = { path = "primitives/self-contained", default-features = false }
 fp-storage = { path = "primitives/storage", default-features = false }
+rpc-primitives-debug = { path = "primitives/debug", default-features = false }
+evm-tracing-events = { path = "primitives/evm-tracing-events", default-features = false }
 # Frontier FRAME
 pallet-base-fee = { path = "frame/base-fee", default-features = false }
 pallet-dynamic-fee = { path = "frame/dynamic-fee", default-features = false }
