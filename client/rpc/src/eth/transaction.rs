@@ -314,7 +314,7 @@ where
 					}
 				};
 
-				return Ok(Some(Receipt {
+				Ok(Some(Receipt {
 					transaction_hash: Some(status.transaction_hash),
 					transaction_index: Some(status.transaction_index.into()),
 					block_hash: Some(block_hash),
@@ -366,7 +366,7 @@ where
 						ethereum::ReceiptV3::EIP2930(_) => U256::from(1),
 						ethereum::ReceiptV3::EIP1559(_) => U256::from(2),
 					},
-				}));
+				}))
 			}
 			_ => Ok(None),
 		}
