@@ -22,5 +22,7 @@ serde_json = { workspace = true }
 # Substrate
 sp-crypto-hashing = { workspace = true, features = ["default"] }
 
+client-evm-tracing = { workspace = true }
+
 [features]
 txpool = []

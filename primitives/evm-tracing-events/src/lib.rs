@@ -32,11 +32,11 @@
 extern crate alloc;
 
 pub mod evm;
-// pub mod gasometer;
+pub mod gasometer;
 pub mod runtime;
 
 pub use self::evm::EvmEvent;
-// pub use gasometer::GasometerEvent;
+pub use gasometer::GasometerEvent;
 pub use runtime::RuntimeEvent;
 
 use ethereum_types::{H160, U256};
@@ -71,7 +71,7 @@ pub struct StepEventFilter {
 #[derive(Clone, Eq, PartialEq, Debug, Encode, Decode)]
 pub enum Event {
 	Evm(evm::EvmEvent),
-	// Gasometer(gasometer::GasometerEvent),
+	Gasometer(gasometer::GasometerEvent),
 	Runtime(runtime::RuntimeEvent),
 	CallListNew(),
 }

@@ -53,6 +53,7 @@ sp-state-machine = { workspace = true, features = ["default"] }
 sp-storage = { workspace = true, features = ["default"] }
 sp-timestamp = { workspace = true, features = ["default"] }
 # Frontier
+client-evm-tracing = { workspace = true }
 fc-api = { workspace = true }
 fc-mapping-sync = { workspace = true }
 fc-rpc-core = { workspace = true }
@@ -61,6 +62,7 @@ fp-evm = { workspace = true, features = ["default"] }
 fp-rpc = { workspace = true, features = ["default"] }
 fp-storage = { workspace = true, features = ["default"] }
 pallet-evm = { workspace = true, features = ["default"] }
+rpc-primitives-debug = { workspace = true, features = ["default"] }
 
 [dev-dependencies]
 tempfile = "3.10.1"

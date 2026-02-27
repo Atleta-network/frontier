@@ -26,13 +26,31 @@ use rlp::Encodable;
 use sc_client_api::backend::{Backend, StorageProvider};
 use sp_api::ProvideRuntimeApi;
 use sp_blockchain::HeaderBackend;
-use sp_runtime::traits::Block as BlockT;
+use sp_runtime::{
+	generic::BlockId,
+	traits::{Block as BlockT, Header as HeaderT, UniqueSaturatedInto},
+};
 // Frontier
-use fc_rpc_core::{types::*, DebugApiServer};
+use client_evm_tracing::{
+	formatters::{self, ResponseFormatter},
+	listeners::{call_list::Listener as CallListListener, raw::Listener as RawListener},
+	types::single::{self, TraceType},
+};
+use fc_rpc_core::{types::*, DebugApiServer, RequestBlockId, RequestBlockTag, TraceParams};
 use fc_storage::StorageOverride;
 use fp_rpc::EthereumRuntimeRPCApi;
+use rpc_primitives_debug::DebugRuntimeApi;
 
 use crate::{cache::EthBlockDataCacheTask, frontier_backend_client, internal_err};
+
+const RAW_TRACE_MAX_MEMORY_USAGE: usize = 32 * 1024 * 1024;
+
+#[derive(Clone, Copy)]
+enum TracerInput {
+	None,
+	Blockscout,
+	CallTracer,
+}
 
 /// Debug API implementation.
 pub struct Debug<B: BlockT, C, BE> {
@@ -150,6 +168,44 @@ impl<B: BlockT, C, BE> Debug<B, C, BE> {
 		let receipts = self.storage_override.current_receipts(substrate_hash);
 		Ok(receipts)
 	}
+
+	fn handle_params(
+		params: Option<TraceParams>,
+	) -> RpcResult<(TracerInput, TraceType, Option<single::TraceCallConfig>)> {
+		match params {
+			Some(TraceParams {
+				tracer: Some(tracer),
+				tracer_config,
+				..
+			}) => {
+				if tracer == "callTracer" {
+					Ok((TracerInput::CallTracer, TraceType::CallList, tracer_config))
+				} else if tracer == "blockscout" {
+					Ok((TracerInput::Blockscout, TraceType::CallList, tracer_config))
+				} else {
+					Err(internal_err(format!("unsupported tracer: {tracer}")))
+				}
+			}
+			Some(params) => Ok((
+				TracerInput::None,
+				TraceType::Raw {
+					disable_storage: params.disable_storage.unwrap_or(false),
+					disable_memory: params.disable_memory.unwrap_or(false),
+					disable_stack: params.disable_stack.unwrap_or(false),
+				},
+				params.tracer_config,
+			)),
+			None => Ok((
+				TracerInput::None,
+				TraceType::Raw {
+					disable_storage: false,
+					disable_memory: false,
+					disable_stack: false,
+				},
+				None,
+			)),
+		}
+	}
 }
 
 #[async_trait]
@@ -157,7 +213,7 @@ impl<B, C, BE> DebugApiServer for Debug<B, C, BE>
 where
 	B: BlockT,
 	C: ProvideRuntimeApi<B>,
-	C::Api: EthereumRuntimeRPCApi<B>,
+	C::Api: EthereumRuntimeRPCApi<B> + DebugRuntimeApi<B>,
 	C: HeaderBackend<B> + StorageProvider<B, BE> + 'static,
 	BE: Backend<B> + 'static,
 {
@@ -190,5 +246,178 @@ where
 		// (we may have multiple clients in the future, but for runtime it's only "multi-wasm-runtime", never "multi-EVM").
 		// We can simply return empty array for this API.
 		Ok(vec![])
+	}
+
+	async fn trace_call(
+		&self,
+		call_params: fc_rpc_core::TraceCallParams,
+		id: RequestBlockId,
+		params: Option<TraceParams>,
+	) -> RpcResult<single::TransactionTrace> {
+		let (tracer_input, trace_type, tracer_config) = Self::handle_params(params)?;
+
+		let reference_id: BlockId<B> = match id {
+			RequestBlockId::Number(n) => Ok(BlockId::Number(n.unique_saturated_into())),
+			RequestBlockId::Tag(RequestBlockTag::Latest) => {
+				Ok(BlockId::Number(self.client.info().best_number))
+			}
+			RequestBlockId::Tag(RequestBlockTag::Earliest) => {
+				Ok(BlockId::Number(0u32.unique_saturated_into()))
+			}
+			RequestBlockId::Tag(RequestBlockTag::Pending) => {
+				Err(internal_err("'pending' blocks are not supported"))
+			}
+			RequestBlockId::Hash(eth_hash) => {
+				match frontier_backend_client::load_hash::<B, C>(
+					self.client.as_ref(),
+					self.backend.as_ref(),
+					eth_hash,
+				)
+				.await
+				{
+					Ok(Some(hash)) => Ok(BlockId::Hash(hash)),
+					Ok(None) => Err(internal_err("Block hash not found")),
+					Err(e) => Err(e),
+				}
+			}
+		}?;
+
+		let mut api = self.client.runtime_api();
+
+		let hash = self
+			.client
+			.expect_block_hash_from_id(&reference_id)
+			.map_err(|_| internal_err("Block header not found"))?;
+		let header = self
+			.client
+			.header(hash)
+			.map_err(|e| internal_err(format!("Failed to read header: {e:?}")))?
+			.ok_or_else(|| internal_err("Block header not found"))?;
+		let parent_block_hash = *header.parent_hash();
+
+		let fc_rpc_core::TraceCallParams {
+			from,
+			to,
+			gas_price,
+			max_fee_per_gas,
+			max_priority_fee_per_gas,
+			gas,
+			value,
+			data,
+			nonce,
+			access_list,
+			..
+		} = call_params;
+
+		let (max_fee_per_gas, max_priority_fee_per_gas) =
+			match (gas_price, max_fee_per_gas, max_priority_fee_per_gas) {
+				(gas_price, None, None) => {
+					let gas_price = if gas_price.unwrap_or_default().is_zero() {
+						None
+					} else {
+						gas_price
+					};
+					(gas_price, gas_price)
+				}
+				(_, max_fee, max_priority) => {
+					let max_fee = if max_fee.unwrap_or_default().is_zero() {
+						None
+					} else {
+						max_fee
+					};
+					if let Some(max_priority) = max_priority {
+						let max_fee = max_fee.unwrap_or_default();
+						if max_priority > max_fee {
+							return Err(internal_err(
+								"Invalid input: `max_priority_fee_per_gas` greater than `max_fee_per_gas`",
+							));
+						}
+					}
+					(max_fee, max_priority)
+				}
+			};
+
+		let gas_limit = match gas {
+			Some(amount) => amount,
+			None => {
+				let block = api
+					.current_block(parent_block_hash)
+					.map_err(|e| internal_err(format!("Runtime api access error: {e:?}")))?
+					.ok_or_else(|| {
+						internal_err("block unavailable, cannot query gas limit")
+					})?;
+				block.header.gas_limit
+			}
+		};
+
+		let data = data.map(|d| d.0).unwrap_or_default();
+		let value = value.unwrap_or_default();
+		let access_list = access_list
+			.unwrap_or_default()
+			.into_iter()
+			.map(|item| (item.address, item.storage_keys))
+			.collect::<Vec<_>>();
+
+		let execute = |api: &mut C::Api| -> RpcResult<()> {
+			api.trace_call(
+				parent_block_hash,
+				&header,
+				from.unwrap_or_default(),
+				to,
+				data.clone(),
+				value,
+				gas_limit,
+				max_fee_per_gas,
+				max_priority_fee_per_gas,
+				nonce,
+				Some(access_list.clone()),
+			)
+			.map_err(|e| internal_err(format!("Runtime api access error: {e:?}")))?
+			.map_err(|e| internal_err(format!("DispatchError: {e:?}")))?;
+
+			Ok(())
+		};
+
+		match trace_type {
+			TraceType::Raw {
+				disable_storage,
+				disable_memory,
+				disable_stack,
+			} => {
+				let mut proxy = RawListener::new(
+					disable_storage,
+					disable_memory,
+					disable_stack,
+					RAW_TRACE_MAX_MEMORY_USAGE,
+				);
+				proxy.using(|| execute(&mut api))?;
+
+				formatters::Raw::format(proxy).ok_or_else(|| {
+					internal_err(
+						"replayed transaction generated too much data; try disabling memory or storage",
+					)
+				})
+			}
+			TraceType::CallList => {
+				let mut proxy = CallListListener::default();
+				proxy.with_log = tracer_config.map_or(false, |cfg| cfg.with_log);
+				proxy.using(|| execute(&mut api))?;
+				proxy.finish_transaction();
+
+				match tracer_input {
+					TracerInput::CallTracer => {
+						let mut traces = formatters::CallTracer::format(proxy)
+							.ok_or_else(|| internal_err("Trace result is empty"))?;
+						traces
+							.pop()
+							.map(|trace| trace.result)
+							.ok_or_else(|| internal_err("Trace result is empty"))
+					}
+					TracerInput::Blockscout | TracerInput::None => formatters::Blockscout::format(proxy)
+						.ok_or_else(|| internal_err("Trace result is empty")),
+				}
+			}
+			_ => Err(internal_err("unsupported trace mode for debug_traceCall")),
+		}
 	}
 }
