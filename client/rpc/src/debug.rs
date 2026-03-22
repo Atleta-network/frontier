@@ -23,7 +23,7 @@ use ethereum_types::H256;
 use jsonrpsee::core::{async_trait, RpcResult};
 use rlp::Encodable;
 // Substrate
-use sc_client_api::backend::{Backend, StorageProvider};
+use sc_client_api::{backend::{Backend, StorageProvider}, BlockBackend};
 use sp_api::ProvideRuntimeApi;
 use sp_blockchain::HeaderBackend;
 use sp_runtime::{
@@ -214,7 +214,7 @@ where
 	B: BlockT,
 	C: ProvideRuntimeApi<B>,
 	C::Api: EthereumRuntimeRPCApi<B> + DebugRuntimeApi<B>,
-	C: HeaderBackend<B> + StorageProvider<B, BE> + 'static,
+	C: BlockBackend<B> + HeaderBackend<B> + StorageProvider<B, BE> + 'static,
 	BE: Backend<B> + 'static,
 {
 	async fn raw_header(&self, number: BlockNumberOrHash) -> RpcResult<Option<Bytes>> {
@@ -246,6 +246,200 @@ where
 		// (we may have multiple clients in the future, but for runtime it's only "multi-wasm-runtime", never "multi-EVM").
 		// We can simply return empty array for this API.
 		Ok(vec![])
+	}
+
+	async fn trace_transaction(
+		&self,
+		hash: H256,
+		params: Option<TraceParams>,
+	) -> RpcResult<single::TransactionTrace> {
+		let (tracer_input, trace_type, tracer_config) = Self::handle_params(params)?;
+
+		let transaction = self
+			.transaction_by(hash)
+			.await?
+			.ok_or_else(|| internal_err("Transaction hash not found"))?;
+
+		let (eth_block_hash, _) = frontier_backend_client::load_transactions::<B, C>(
+			self.client.as_ref(),
+			self.backend.as_ref(),
+			hash,
+			true,
+		)
+		.await?
+		.ok_or_else(|| internal_err("Transaction hash not found"))?;
+
+		let reference_hash = frontier_backend_client::load_hash::<B, C>(
+			self.client.as_ref(),
+			self.backend.as_ref(),
+			eth_block_hash,
+		)
+		.await?
+		.ok_or_else(|| internal_err("Block hash not found"))?;
+
+		let header = self
+			.client
+			.header(reference_hash)
+			.map_err(|e| internal_err(format!("Failed to read header: {e:?}")))?
+			.ok_or_else(|| internal_err("Block header not found"))?;
+		let parent_block_hash = *header.parent_hash();
+
+		let extrinsics = self
+			.client
+			.block_body(reference_hash)
+			.map_err(|e| internal_err(format!("Failed to read block body: {e:?}")))?
+			.unwrap_or_default();
+
+		let mut api = self.client.runtime_api();
+		let execute = |api: &mut C::Api| -> RpcResult<()> {
+			api.trace_transaction(
+				parent_block_hash,
+				extrinsics.clone(),
+				&transaction,
+				&header,
+			)
+			.map_err(|e| internal_err(format!("Runtime api access error: {e:?}")))?
+			.map_err(|e| internal_err(format!("DispatchError: {e:?}")))?;
+
+			Ok(())
+		};
+
+		match trace_type {
+			TraceType::Raw {
+				disable_storage,
+				disable_memory,
+				disable_stack,
+			} => {
+				let mut proxy = RawListener::new(
+					disable_storage,
+					disable_memory,
+					disable_stack,
+					RAW_TRACE_MAX_MEMORY_USAGE,
+				);
+				proxy.using(|| execute(&mut api))?;
+
+				formatters::Raw::format(proxy).ok_or_else(|| {
+					internal_err(
+						"replayed transaction generated too much data; try disabling memory or storage",
+					)
+				})
+			}
+			TraceType::CallList => {
+				let mut proxy = CallListListener::default();
+				proxy.with_log = tracer_config.map_or(false, |cfg| cfg.with_log);
+				proxy.using(|| execute(&mut api))?;
+				proxy.finish_transaction();
+
+				match tracer_input {
+					TracerInput::CallTracer => {
+						let mut traces = formatters::CallTracer::format(proxy)
+							.ok_or_else(|| internal_err("Trace result is empty"))?;
+						traces
+							.pop()
+							.map(|trace| trace.result)
+							.ok_or_else(|| internal_err("Trace result is empty"))
+					}
+					TracerInput::Blockscout | TracerInput::None => formatters::Blockscout::format(proxy)
+						.ok_or_else(|| internal_err("Trace result is empty")),
+				}
+			}
+			_ => Err(internal_err(
+				"unsupported trace mode for debug_traceTransaction",
+			)),
+		}
+	}
+
+	async fn trace_block(
+		&self,
+		id: BlockNumberOrHash,
+		params: Option<TraceParams>,
+	) -> RpcResult<Vec<single::TransactionTrace>> {
+		let (tracer_input, trace_type, tracer_config) = Self::handle_params(params)?;
+
+		let block = self
+			.block_by(id)
+			.await?
+			.ok_or_else(|| internal_err("Block not found"))?;
+		let known_transactions = block
+			.transactions
+			.iter()
+			.map(|transaction| transaction.hash())
+			.collect::<Vec<_>>();
+
+		let reference_hash = frontier_backend_client::load_hash::<B, C>(
+			self.client.as_ref(),
+			self.backend.as_ref(),
+			block.header.hash(),
+		)
+		.await?
+		.ok_or_else(|| internal_err("Block hash not found"))?;
+
+		let header = self
+			.client
+			.header(reference_hash)
+			.map_err(|e| internal_err(format!("Failed to read header: {e:?}")))?
+			.ok_or_else(|| internal_err("Block header not found"))?;
+		let parent_block_hash = *header.parent_hash();
+
+		let extrinsics = self
+			.client
+			.block_body(reference_hash)
+			.map_err(|e| internal_err(format!("Failed to read block body: {e:?}")))?
+			.unwrap_or_default();
+
+		let mut api = self.client.runtime_api();
+		let execute = |api: &mut C::Api| -> RpcResult<()> {
+			api.trace_block(
+				parent_block_hash,
+				extrinsics.clone(),
+				known_transactions.clone(),
+				&header,
+			)
+			.map_err(|e| internal_err(format!("Runtime api access error: {e:?}")))?
+			.map_err(|e| internal_err(format!("DispatchError: {e:?}")))?;
+
+			Ok(())
+		};
+
+		match trace_type {
+			TraceType::CallList => {
+				let mut proxy = CallListListener::default();
+				proxy.with_log = tracer_config.map_or(false, |cfg| cfg.with_log);
+				proxy.using(|| execute(&mut api))?;
+				proxy.finish_transaction();
+
+				match tracer_input {
+					TracerInput::CallTracer => formatters::CallTracer::format(proxy)
+						.map(|traces| {
+							traces
+								.into_iter()
+								.map(|trace| trace.result)
+								.collect::<Vec<_>>()
+						})
+						.ok_or_else(|| internal_err("Trace result is empty")),
+					TracerInput::Blockscout | TracerInput::None => {
+						let traces = std::mem::take(&mut proxy.entries)
+							.into_iter()
+							.filter(|entry| !entry.is_empty())
+							.filter_map(|entry| {
+								let mut listener = CallListListener::default();
+								listener.entries.push(entry);
+								formatters::Blockscout::format(listener)
+							})
+							.collect::<Vec<_>>();
+
+						if traces.is_empty() {
+							Err(internal_err("Trace result is empty"))
+						} else {
+							Ok(traces)
+						}
+					}
+				}
+			}
+			_ => Err(internal_err(
+				"debug_traceBlockByNumber only supports call list mode",
+			)),
+		}
 	}
 
 	async fn trace_call(

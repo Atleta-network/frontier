@@ -23,7 +23,7 @@ use ethereum_types::{H160, H256, U256};
 use jsonrpsee::{core::RpcResult, proc_macros::rpc};
 use serde::{de::Error, Deserializer, Deserialize};
 
-use client_evm_tracing::types::{block, single};
+use client_evm_tracing::types::single;
 
 use crate::types::{BlockNumberOrHash, Bytes};
 
@@ -130,4 +130,18 @@ pub trait DebugApi {
 		id: RequestBlockId,
 		params: Option<TraceParams>,
 	) -> RpcResult<single::TransactionTrace>;
+
+	#[method(name = "debug_traceTransaction")]
+	async fn trace_transaction(
+		&self,
+		hash: H256,
+		params: Option<TraceParams>,
+	) -> RpcResult<single::TransactionTrace>;
+
+	#[method(name = "debug_traceBlockByNumber")]
+	async fn trace_block(
+		&self,
+		id: BlockNumberOrHash,
+		params: Option<TraceParams>,
+	) -> RpcResult<Vec<single::TransactionTrace>>;
 }
